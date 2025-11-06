@@ -145,15 +145,9 @@ def run_pipeline(
         azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
         device=device,
     )
-    ctx = NVDiffRastContextWrapper(device=device)
+    ctx = NVDiffRastContextWrapper(device=device, context_type="cuda")
 
-    mesh, offset, scale = load_mesh(
-        mesh_path,
-        rescale=True,
-        move_to_center=True,
-        device=device,
-        return_transform=True,
-    )
+    mesh = load_mesh(mesh_path, rescale=True, device=device)
     transform_dict = {"offset": offset.tolist(), "scale": scale.tolist()}
 
     render_out = render(

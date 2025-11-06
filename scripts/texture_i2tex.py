@@ -16,13 +16,13 @@ if __name__ == "__main__":
     # I/O
     parser.add_argument("--mesh", type=str, required=True)
     parser.add_argument("--image", type=str, required=True)
-    parser.add_argument("--text", type=str, default="high quality")
+    parser.add_argument("--text", type=str, default="high quality photo, photograph of a person")
     parser.add_argument("--seed", type=int, default=-1)
     parser.add_argument("--save_dir", type=str, default="./output")
     parser.add_argument("--save_name", type=str, default="i2tex_sample")
     # Extra
     parser.add_argument("--reference_conditioning_scale", type=float, default=1.0)
-    parser.add_argument("--preprocess_mesh", action="store_true")
+    parser.add_argument("--preprocess_mesh", default=False, type=bool)
     parser.add_argument("--remove_bg", action="store_true")
     args = parser.parse_args()
 
@@ -78,6 +78,7 @@ if __name__ == "__main__":
         upscaler_ckpt_path="./checkpoints/RealESRGAN_x2plus.pth",
         inpaint_ckpt_path="./checkpoints/big-lama.pt",
         device=device,
+        context_type="cuda",  # Use CUDA context for headless environments
     )
     print("Pipeline ready.")
 
@@ -86,6 +87,7 @@ if __name__ == "__main__":
     # 1. run MV-Adapter to generate multi-view images
     images, _, _, _ = run_pipeline(
         pipe,
+        
         mesh_path=args.mesh,
         num_views=num_views,
         text=args.text,
