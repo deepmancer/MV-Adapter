@@ -268,7 +268,7 @@ def process_raw(mesh_path, save_path, preprocess=True, device="cpu"):
 
     mesh_post_process_options = {
         "mincomponentRatio": 0.02,
-        "targetfacenum": 50000,
+        "targetfacenum": 200000,
         "maxholesize": 100,
         "stepsmoothnum": 10,
         "verbose": False,
