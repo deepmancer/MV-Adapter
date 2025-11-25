@@ -227,9 +227,10 @@ def uv_parameterize_uvatlas(
     gutter=2.5,
     max_stretch=0.1666666716337204,
     parallel_partitions=16,
-    nthreads=0,
+    nthreads=32,
+    use_cuda=True,
 ):
-    device = o3d.core.Device("CPU:0")
+    device = o3d.core.Device("CUDA:0" if use_cuda and o3d.core.cuda.is_available() else "CPU:0")
     dtype_f = o3d.core.float32
     dtype_i = o3d.core.int64
 
@@ -248,7 +249,13 @@ def uv_parameterize_uvatlas(
         nthreads=nthreads,
     )
 
-    return mesh.triangle.texture_uvs.numpy()  # (#F, 3, 2)
+    # Copy tensor to CPU before converting to numpy if on CUDA
+    texture_uvs = mesh.triangle.texture_uvs
+    if texture_uvs.device.get_type() != o3d.core.Device.DeviceType.CPU:
+        texture_uvs = texture_uvs.cpu()
+    
+    return texture_uvs.numpy()  # (#F, 3, 2)
+
 
 
 ### Pack All ###
@@ -268,10 +275,10 @@ def process_raw(mesh_path, save_path, preprocess=True, device="cpu"):
 
     mesh_post_process_options = {
         "mincomponentRatio": 0.02,
-        "targetfacenum": 200000,
+        "targetfacenum": 150_000,
         "maxholesize": 100,
-        "stepsmoothnum": 10,
-        "verbose": False,
+        "stepsmoothnum": 2,
+        "verbose": True,
     }
 
     if preprocess:

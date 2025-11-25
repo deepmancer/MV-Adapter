@@ -398,7 +398,7 @@ class TexturePipeline:
 
         shaded_model_save_path = None
         if mod_uv_image["rgb"] is not None:
-            shaded_model_save_path = os.path.join(save_dir, f"{save_name}_shaded.glb")
+            shaded_model_save_path = os.path.join(save_dir, f"{save_name}.glb")
             replace_mesh_texture_and_save(
                 mesh_path,
                 shaded_model_save_path,
