@@ -1,7 +1,13 @@
 import argparse
+import faulthandler
+import gc
+import logging
 import os
 import random
+import signal
+import sys
 import tempfile
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +18,27 @@ import bpy
 
 from mvadapter.pipelines.pipeline_texture import ModProcessConfig, TexturePipeline
 from mvadapter.utils import make_image_grid
+
+# Enable faulthandler to get better stack traces on segfaults
+faulthandler.enable()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    stream=sys.stdout
+)
+logger = logging.getLogger("texture_i2tex")
+
+# Set up signal handler for debugging
+def signal_handler(signum, frame):
+    logger.error(f"Received signal {signum}")
+    logger.error("Stack trace:")
+    traceback.print_stack(frame)
+    sys.exit(1)
+
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 def _clear_blender_scene():
@@ -234,7 +261,7 @@ def inference_i2gtex(
         upscaler_ckpt_path="./checkpoints/RealESRGAN_x2plus.pth",
         inpaint_ckpt_path="./checkpoints/big-lama.pt",
         device=device,
-        context_type="cuda",
+        context_type="gl",  # Use GL context for better stability with pymeshlab/open3d
     )
     print("Pipelines ready.")
 
@@ -252,18 +279,18 @@ def inference_i2gtex(
     failed_samples = []
     
     for idx, sample_id in enumerate(sample_ids, 1):
-        print(f"\n{'='*60}")
-        print(f"Processing sample {idx}/{len(sample_ids)}: {sample_id}")
-        print(f"{'='*60}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Processing sample {idx}/{len(sample_ids)}: {sample_id}")
+        logger.info(f"{'='*60}")
         
         image_path = image_dir_path / f"{sample_id}.png"
         mesh_path = _get_mesh_path(Path(data_dir), shape_provider, sample_id)
 
         if not image_path.exists():
-            print(f"Warning: Image not found at {image_path}, skipping...")
+            logger.warning(f"Image not found at {image_path}, skipping...")
             continue
         if mesh_path is None:
-            print(f"Warning: Mesh not found for sample {sample_id}, skipping...")
+            logger.warning(f"Mesh not found for sample {sample_id}, skipping...")
             continue
         
         mesh_path_to_use, temp_aligned_mesh_path = _handle_mesh_alignment(
@@ -272,13 +299,13 @@ def inference_i2gtex(
         
         text_prompt = _load_text_prompt(sample_id, prompt_dir, default_text)
         if prompt_dir is not None and Path(prompt_dir) / f"{sample_id}.txt":
-            print(f"Using prompt: {text_prompt[:50]}..." if len(text_prompt) > 50 else f"Using prompt: {text_prompt}")
+            logger.info(f"Using prompt: {text_prompt[:50]}..." if len(text_prompt) > 50 else f"Using prompt: {text_prompt}")
         
         sample_output_dir = Path(output_dir) / shape_provider / sample_id
         os.makedirs(sample_output_dir, exist_ok=True)
 
         try:
-            print("Generating multi-view images...")
+            logger.info("Step 1/3: Generating multi-view images...")
             images, _, _, _ = config['run_pipeline'](
                 pipe,
                 mesh_path=mesh_path_to_use,
@@ -298,11 +325,20 @@ def inference_i2gtex(
             
             mv_path = sample_output_dir / "multiview.png"
             make_image_grid(images, rows=1).save(str(mv_path))
-            print(f"Multi-view image saved to {mv_path}")
+            logger.info(f"Multi-view image saved to {mv_path}")
 
+            # Force cleanup before texture generation
+            logger.info("Cleaning up GPU memory...")
+            gc.collect()
             torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
-            print("Generating textured mesh...")
+            logger.info("Step 2/3: Generating textured mesh...")
+            logger.info(f"  Input mesh: {mesh_path_to_use}")
+            logger.info(f"  UV size: {config['uv_size']}")
+            logger.info(f"  Preprocess mesh: {preprocess_mesh}")
+            
             out = texture_pipe(
                 mesh_path=mesh_path_to_use,
                 save_dir=str(sample_output_dir),
@@ -314,36 +350,42 @@ def inference_i2gtex(
                 rgb_process_config=ModProcessConfig(view_upscale=True, inpaint_mode="view"),
                 camera_azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
             )
-            print(f"Textured mesh saved to {out.shaded_model_save_path}")
+            logger.info(f"Step 3/3: Textured mesh saved to {out.shaded_model_save_path}")
             
             if align_output_mesh and out.shaded_model_save_path is not None:
                 _apply_output_alignment(out.shaded_model_save_path)
             
             _cleanup_temp_file(temp_aligned_mesh_path)
             successful_samples.append(sample_id)
+            logger.info(f"Sample {sample_id} completed successfully")
             
         except Exception as e:
-            print(f"Error processing sample {sample_id}: {e}")
-            import traceback
+            logger.error(f"Error processing sample {sample_id}: {e}")
+            logger.error("Full traceback:")
             traceback.print_exc()
             _cleanup_temp_file(temp_aligned_mesh_path)
             failed_samples.append(sample_id)
+            
+            # Cleanup after error
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             continue
     
-    print(f"\n{'='*60}")
-    print(f"Processing Summary")
-    print(f"{'='*60}")
-    print(f"Total samples: {len(sample_ids)}")
-    print(f"Successful: {len(successful_samples)}")
-    print(f"Failed: {len(failed_samples)}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Processing Summary")
+    logger.info(f"{'='*60}")
+    logger.info(f"Total samples: {len(sample_ids)}")
+    logger.info(f"Successful: {len(successful_samples)}")
+    logger.info(f"Failed: {len(failed_samples)}")
     
     if failed_samples:
-        print(f"\nFailed samples:")
+        logger.info(f"\nFailed samples:")
         for sample_id in failed_samples:
-            print(f"  - {sample_id}")
+            logger.info(f"  - {sample_id}")
     
-    print(f"\nAll outputs saved to {output_dir}")
-    print(f"{'='*60}")
+    logger.info(f"\nAll outputs saved to {output_dir}")
+    logger.info(f"{'='*60}")
 
 
 if __name__ == "__main__":
@@ -359,7 +401,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="/workspace/outputs_new/mvadapter/")
     parser.add_argument("--shape_provider", type=str, default="hunyuan", choices=["hunyuan", "hi3dgen"])
     parser.add_argument(
-        "--sdxl_model_id", type=str, default="stabilityai/stable-diffusion-xl-base-1.0",
+        "--sdxl_model_id", type=str, default="SG161222/RealVisXL_V4.0",
         choices=["stabilityai/stable-diffusion-xl-base-1.0", "SG161222/RealVisXL_V4.0"],
     )
     # Extra

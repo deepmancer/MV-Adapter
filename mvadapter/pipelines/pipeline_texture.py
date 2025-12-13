@@ -1,4 +1,8 @@
+import gc
+import logging
 import os
+import sys
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
@@ -24,9 +28,16 @@ from mvadapter.utils.mesh_utils import (
 )
 from mvadapter.utils.mesh_utils.mesh_process import process_raw
 
+# Configure logging
+logger = logging.getLogger("pipeline_texture")
+
 
 def clear():
+    """Clear GPU memory and run garbage collection."""
+    gc.collect()
     torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 @contextmanager
@@ -57,7 +68,8 @@ class TexturePipelineOutput:
 
 
 class TexturePipeline:
-    def __init__(self, upscaler_ckpt_path: str, inpaint_ckpt_path: str, device: str, context_type: str = "cuda"):
+    def __init__(self, upscaler_ckpt_path: str, inpaint_ckpt_path: str, device: str, context_type: str = "gl"):
+        # Use GL context by default as it's more stable with pymeshlab/open3d operations
         self.device = device
         self.ctx = NVDiffRastContextWrapper(device=self.device, context_type=context_type)
         self.cam_proj = CameraProjection(
@@ -170,6 +182,13 @@ class TexturePipeline:
         # debug
         debug_mode: bool = False,
     ):
+        logger.info("=" * 50)
+        logger.info("TexturePipeline.__call__ started")
+        logger.info(f"  mesh_path: {mesh_path}")
+        logger.info(f"  uv_unwarp: {uv_unwarp}")
+        logger.info(f"  preprocess_mesh: {preprocess_mesh}")
+        logger.info("=" * 50)
+        
         clear()
 
         if debug_mode:
@@ -177,19 +196,36 @@ class TexturePipeline:
             os.makedirs(debug_dir, exist_ok=True)
 
         if uv_unwarp:
-            file_suffix = os.path.splitext(mesh_path)[-1]
-            mesh_path_new = mesh_path.replace(file_suffix, f"_unwarp{file_suffix}")
-            process_raw(mesh_path, mesh_path_new, preprocess=preprocess_mesh)
-            mesh_path = mesh_path_new
+            logger.info("Starting UV unwrap process...")
+            try:
+                file_suffix = os.path.splitext(mesh_path)[-1]
+                mesh_path_new = mesh_path.replace(file_suffix, f"_unwarp{file_suffix}")
+                logger.info(f"  Output path: {mesh_path_new}")
+                process_raw(mesh_path, mesh_path_new, preprocess=preprocess_mesh)
+                mesh_path = mesh_path_new
+                logger.info("UV unwrap completed successfully")
+            except Exception as e:
+                logger.error(f"UV unwrap failed: {e}")
+                logger.error(traceback.format_exc())
+                raise
+            # Force synchronization after mesh processing to ensure stable GPU state
+            clear()
 
-        mesh: TexturedMesh = load_mesh(
-            mesh_path,
-            rescale=True,
-            move_to_center=move_to_center,
-            front_x_to_y=front_x,
-            default_uv_size=uv_size,
-            device=self.device,
-        )
+        logger.info("Loading processed mesh...")
+        try:
+            mesh: TexturedMesh = load_mesh(
+                mesh_path,
+                rescale=True,
+                move_to_center=move_to_center,
+                front_x_to_y=front_x,
+                default_uv_size=uv_size,
+                device=self.device,
+            )
+            logger.info(f"Mesh loaded: {mesh.v_pos.shape[0]} vertices, {mesh.t_pos_idx.shape[0]} faces")
+        except Exception as e:
+            logger.error(f"Mesh loading failed: {e}")
+            logger.error(traceback.format_exc())
+            raise
 
         # projection
         if camera_projection_type == "PERSP":

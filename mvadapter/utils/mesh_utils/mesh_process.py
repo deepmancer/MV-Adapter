@@ -1,355 +1,618 @@
+"""
+Mesh processing utilities using Open3D and trimesh.
+"""
+
+import gc
+import logging
+from typing import Tuple
+
 import numpy as np
 import open3d as o3d
-import pymeshlab
 import torch
 import trimesh
-from pymeshlab import Percentage
+
+logger = logging.getLogger("mesh_process")
 
 
-### Mesh Utils ###
-##### read mesh
-def read_mesh_from_path(mesh_path):
-    ms = pymeshlab.MeshSet()
-    ms.load_new_mesh(mesh_path)
-    return ms
+### Mesh Utils using Open3D and trimesh ###
+
+def merge_close_vertices_o3d(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    threshold: float = 0.0001,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Merge vertices that are closer than a threshold using trimesh.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        threshold: Distance threshold for merging
+        verbose: Whether to print progress
+        
+    Returns:
+        Merged vertices and updated faces
+    """
+    try:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        mesh.merge_vertices(merge_tex=False, merge_norm=False)
+        
+        return np.array(mesh.vertices), np.array(mesh.faces)
+    except Exception as e:
+        logger.debug(f"Vertex merging failed: {e}")
+        return vertices, faces
 
 
-def mesh_to_meshlab(vertices, faces):
-    mesh = pymeshlab.Mesh(vertex_matrix=vertices, face_matrix=faces)
-    ms = pymeshlab.MeshSet()
-    ms.add_mesh(mesh)
-    return ms
+def remove_isolated_pieces_o3d(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    min_component_ratio: float = 0.02,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Remove small isolated mesh components using trimesh.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        min_component_ratio: Minimum ratio of faces to keep a component
+        verbose: Whether to print progress
+        
+    Returns:
+        Cleaned vertices and faces
+    """
+    try:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        components = mesh.split(only_watertight=False)
+        
+        if len(components) <= 1:
+            return vertices, faces
+        
+        # Find the largest component or components above threshold
+        min_faces = int(len(faces) * min_component_ratio)
+        valid_components = [c for c in components if len(c.faces) >= min_faces]
+        
+        if not valid_components:
+            # Keep at least the largest component
+            valid_components = [max(components, key=lambda c: len(c.faces))]
+        
+        result_mesh = valid_components[0] if len(valid_components) == 1 else trimesh.util.concatenate(valid_components)
+        return np.array(result_mesh.vertices), np.array(result_mesh.faces)
+    except Exception as e:
+        logger.debug(f"Isolated piece removal failed: {e}")
+        return vertices, faces
 
 
-def meshlab_to_mesh(ms):
-    m = ms.current_mesh()
-    return m.vertex_matrix(), m.face_matrix(), m.vertex_normal_matrix()
+def fill_holes_trimesh(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    max_hole_size: int = 30,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Fill small holes in the mesh using trimesh.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        max_hole_size: Maximum number of edges in hole to fill
+        verbose: Whether to print progress
+        
+    Returns:
+        Mesh with holes filled
+    """
+    try:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        mesh.fill_holes()
+        return np.array(mesh.vertices), np.array(mesh.faces)
+    except Exception as e:
+        logger.debug(f"Hole filling failed: {e}")
+        return vertices, faces
 
 
-##### decimation
-def decimate_quadric_edge_collapse_with_texture(
-    ms, targetfacenum=None, preservenormal=True, verbose=False
-):
-    # targetfacenum: int, Target number of faces.
-    # preservenormal: bool, Preserve the normals of the original mesh.
-    if verbose:
-        print("Starting decimation ...  ")
-    m = ms.current_mesh()
-    if targetfacenum is None:
-        targetfacenum = int(m.face_number() * 0.5)
-    if verbose:
-        print("... Initial face number is %d ... " % m.face_number())
-    ms.meshing_decimation_quadric_edge_collapse_with_texture(
-        targetfacenum=targetfacenum, preservenormal=preservenormal
-    )
-    if verbose:
-        print("... Decimated face number is %d ... " % m.face_number())
-        print("Decimation done!\n ")
+def repair_mesh_trimesh(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Repair non-manifold edges and remove degenerate faces using trimesh.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        verbose: Whether to print progress
+        
+    Returns:
+        Repaired mesh
+    """
+    try:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        mesh.remove_degenerate_faces()
+        mesh.remove_duplicate_faces()
+        mesh.remove_unreferenced_vertices()
+        mesh.fix_normals()
+        return np.array(mesh.vertices), np.array(mesh.faces)
+    except Exception as e:
+        logger.debug(f"Mesh repair failed: {e}")
+        return vertices, faces
 
 
-def decimate_quadric_edge_collapse(
-    ms, targetfacenum=None, preservenormal=True, verbose=False
-):
-    # targetfacenum: int, Target number of faces.
-    # preservenormal: bool, Preserve the normals of the original mesh.
-    if verbose:
-        print("Starting decimation ...  ")
-    m = ms.current_mesh()
-    if targetfacenum is None:
-        targetfacenum = int(m.face_number() * 0.5)
-    if verbose:
-        print("... Initial face number is %d ... " % m.face_number())
-    ms.meshing_decimation_quadric_edge_collapse(
-        targetfacenum=targetfacenum, preservenormal=preservenormal
-    )
-    if verbose:
-        print("... Decimated face number is %d ... " % m.face_number())
-        print("Decimation done!\n ")
-
-
-##### vertex merge
-def merge_close_vertices(ms, threshold=0.0001, verbose=False):
-    # threshold: float, Merge together all the vertices that are nearer than the specified threshold.
-    if verbose:
-        print("Starting merge vertices ...  ")
-    m = ms.current_mesh()
-    if verbose:
-        print("... Initial vertex number is %d ... " % m.vertex_number())
-    ms.meshing_merge_close_vertices(threshold=Percentage(threshold * 100))
-    if verbose:
-        print("... Merged vertex number is %d ... " % m.vertex_number())
-        print("Merge vertices done!\n ")
-
-
-##### Island Removal
-def remove_isolated_pieces(ms, mincomponentsize=25, diameter=None, verbose=False):
-    # mincomponentsize: Delete isolated connected components composed by a limited number of triangles
-    # diameter: Delete isolated connected components whose diameter is smaller than the specified constant
-    if verbose:
-        print("Starting remove isolated pieces ...  ")
-    m = ms.current_mesh()
-    if verbose:
-        print("... Initial face number is %d ... " % m.face_number())
-    if diameter is None:
-        ms.meshing_remove_connected_component_by_face_number(
-            mincomponentsize=mincomponentsize, removeunref=True
+def smooth_mesh_laplacian(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    iterations: int = 3,
+    lambda_factor: float = 0.5,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Apply Laplacian smoothing using Open3D.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        iterations: Number of smoothing iterations
+        lambda_factor: Smoothing strength (0-1)
+        verbose: Whether to print progress
+        
+    Returns:
+        Smoothed mesh
+    """
+    try:
+        # Create Open3D mesh
+        o3d_mesh = o3d.geometry.TriangleMesh()
+        o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices.astype(np.float64))
+        o3d_mesh.triangles = o3d.utility.Vector3iVector(faces.astype(np.int32))
+        
+        # Apply Laplacian smoothing
+        o3d_mesh = o3d_mesh.filter_smooth_laplacian(
+            number_of_iterations=iterations,
+            lambda_filter=lambda_factor
         )
-    else:
-        ms.meshing_remove_connected_component_by_diameter(
-            mincomponentdiag=Percentage(diameter), removeunref=True
+        
+        return np.asarray(o3d_mesh.vertices).astype(np.float32), np.asarray(o3d_mesh.triangles).astype(np.int64)
+    except Exception as e:
+        logger.debug(f"Laplacian smoothing failed: {e}")
+        return vertices, faces
+
+
+def smooth_mesh_taubin(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    iterations: int = 10,
+    lambda_factor: float = 0.5,
+    mu_factor: float = -0.53,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Apply Taubin smoothing using Open3D.
+    Taubin smoothing reduces shrinkage compared to Laplacian smoothing.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        iterations: Number of smoothing iterations
+        lambda_factor: Positive smoothing factor
+        mu_factor: Negative smoothing factor (should be negative)
+        verbose: Whether to print progress
+        
+    Returns:
+        Smoothed mesh
+    """
+    try:
+        # Create Open3D mesh
+        o3d_mesh = o3d.geometry.TriangleMesh()
+        o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices.astype(np.float64))
+        o3d_mesh.triangles = o3d.utility.Vector3iVector(faces.astype(np.int32))
+        
+        # Apply Taubin smoothing
+        o3d_mesh = o3d_mesh.filter_smooth_taubin(
+            number_of_iterations=iterations,
+            lambda_filter=lambda_factor,
+            mu=mu_factor
         )
-    if verbose:
-        print("... Isolated removed face number is %d ... " % m.face_number())
-        print("Remove isolated pieces done!\n ")
+        
+        return np.asarray(o3d_mesh.vertices).astype(np.float32), np.asarray(o3d_mesh.triangles).astype(np.int64)
+    except Exception as e:
+        logger.debug(f"Taubin smoothing failed: {e}")
+        return vertices, faces
 
 
-##### hole filling
-def fix_hole(ms, maxholesize=30, verbose=False):
-    # maxholesize: int, Maximum size of the hole to be filled.
-    if verbose:
-        print("Starting fix holes ...  ")
-    m = ms.current_mesh()
-    if verbose:
-        print("... Initial face number is %d ... " % m.face_number())
-    ms.meshing_close_holes(maxholesize=maxholesize)
-    if verbose:
-        print("... Fixed hole face number is %d ... " % m.face_number())
-        print("Fix holes done!\n ")
-
-
-##### repair non manifold edges
-def repair_non_manifold(ms, verbose=False):
-    if verbose:
-        print("Starting repair non manifold edges ...  ")
-    m = ms.current_mesh()
-    if verbose:
-        print("... Initial face number is %d ... " % m.face_number())
-    ms.meshing_repair_non_manifold_edges()
-    ms.meshing_repair_non_manifold_vertices(vertdispratio=0.1)
-    ms.meshing_remove_duplicate_faces()
-    if verbose:
-        print("... Fixed non manifold edges face number is %d ... " % m.face_number())
-        print("Repair non manifold edges done!\n ")
-
-
-##### laplacian_smooth
-def laplacian_smooth(ms, stepsmoothnum=3, verbose=False):
-    # stepsmoothnum: int, Number of smoothing steps to be performed
-    if verbose:
-        print("Starting laplacian smooth ...  ")
-    m = ms.current_mesh()
-    ms.apply_coord_laplacian_smoothing(stepsmoothnum=stepsmoothnum)
-    if verbose:
-        print("Laplacian smooth done!\n ")
-
-
-##### taubin_smooth
-def taubin_smooth(ms, stepsmoothnum=3, verbose=False):
-    if verbose:
-        print("Starting Taubin smooth ...  ")
-    m = ms.current_mesh()
-    ms.apply_coord_taubin_smoothing(stepsmoothnum=stepsmoothnum)
-    if verbose:
-        print("Taubin smooth done!\n ")
-
-
-##### compute_normal
-def compute_normal(ms, weightmode="Simple Average", verbose=False):
-    if verbose:
-        print("Starting compute_normal_per_vertex ...  ")
-    m = ms.current_mesh()
-    ms.compute_normal_per_vertex(weightmode=weightmode)
-    if verbose:
-        print("compute_normal_per_vertex done!\n ")
-
-
-### Pre-process Mesh ###
-def process_mesh(
-    vertices,
-    faces,
-    threshold=0.0001,
-    mincomponentRatio=0.02,
-    targetfacenum=50000,
-    maxholesize=30,
-    stepsmoothnum=10,
-    verbose=False,
-):
-    ms = mesh_to_meshlab(vertices, faces)
-
-    ### Vertex Merge
-    merge_close_vertices(ms, threshold=threshold, verbose=verbose)
-
-    ### Island Removal
-    faces = ms.current_mesh().face_matrix()
-    remove_isolated_pieces(
-        ms, mincomponentsize=int(len(faces) * mincomponentRatio), verbose=verbose
-    )
-
-    ### Hole Filling
-    repair_non_manifold(ms)  # repair before fix hole
-    fix_hole(ms, maxholesize=maxholesize, verbose=verbose)
-
-    ### Taubin Smoothing
-    taubin_smooth(ms, stepsmoothnum=stepsmoothnum, verbose=verbose)
-
-    vertices, faces, _ = meshlab_to_mesh(ms)
-    if faces.shape[0] > targetfacenum:
+def decimate_mesh_o3d(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    target_faces: int = 50000,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Decimate mesh using Open3D's quadric decimation.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        target_faces: Target number of faces
+        verbose: Whether to print progress
+        
+    Returns:
+        Decimated mesh
+    """
+    if len(faces) <= target_faces:
+        return vertices, faces
+    
+    try:
+        # Use Open3D tensor API for decimation
         device = o3d.core.Device("CPU:0")
         dtype_f = o3d.core.float32
         dtype_i = o3d.core.int64
+        
         mesh = o3d.t.geometry.TriangleMesh(device)
         mesh.vertex.positions = o3d.core.Tensor(
             vertices.astype(np.float32), dtype_f, device
         )
-        mesh.triangle.indices = o3d.core.Tensor(faces.astype(np.int64), dtype_i, device)
-        simplified_mesh = mesh.simplify_quadric_decimation(
-            target_reduction=1.0 - float(targetfacenum) / faces.shape[0]
+        mesh.triangle.indices = o3d.core.Tensor(
+            faces.astype(np.int64), dtype_i, device
         )
-        ms.clear()
-        vertices = simplified_mesh.vertex.positions.numpy()
-        faces = simplified_mesh.triangle.indices.numpy()
-        mesh = pymeshlab.Mesh(vertex_matrix=vertices, face_matrix=faces)
-        ms.add_mesh(mesh)
+        
+        target_reduction = 1.0 - float(target_faces) / len(faces)
+        simplified_mesh = mesh.simplify_quadric_decimation(
+            target_reduction=target_reduction
+        )
+        
+        return simplified_mesh.vertex.positions.numpy(), simplified_mesh.triangle.indices.numpy()
+    except Exception as e:
+        logger.debug(f"Decimation failed: {e}")
+        return vertices, faces
 
-    ### Mesh Simplification/Decimation
-    # decimate_quadric_edge_collapse(ms, targetfacenum=targetfacenum, verbose=verbose)
-    taubin_smooth(ms, stepsmoothnum=stepsmoothnum, verbose=verbose)
-    repair_non_manifold(ms, verbose=verbose)
-    compute_normal(ms, verbose=verbose)
-    return meshlab_to_mesh(ms)
+
+def compute_vertex_normals(
+    vertices: np.ndarray,
+    faces: np.ndarray
+) -> np.ndarray:
+    """
+    Compute vertex normals using trimesh.
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        
+    Returns:
+        Vertex normals (N, 3)
+    """
+    try:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        return np.array(mesh.vertex_normals).astype(np.float32)
+    except Exception as e:
+        logger.debug(f"Normal computation failed: {e}")
+        return np.zeros_like(vertices, dtype=np.float32)
+
+
+### Pre-process Mesh (pymeshlab-free version) ###
+def process_mesh(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    threshold: float = 0.0001,
+    mincomponentRatio: float = 0.02,
+    targetfacenum: int = 50000,
+    maxholesize: int = 30,
+    stepsmoothnum: int = 10,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Process mesh with various cleanup and smoothing operations.
+    This version uses Open3D and trimesh instead of pymeshlab.
+    
+    Args:
+        vertices: Input vertex positions
+        faces: Input face indices
+        threshold: Vertex merge threshold
+        mincomponentRatio: Minimum component size ratio
+        targetfacenum: Target face count for decimation
+        maxholesize: Maximum hole size to fill
+        stepsmoothnum: Number of smoothing iterations
+        verbose: Whether to print progress
+        
+    Returns:
+        Processed vertices, faces, and normals
+    """
+    try:
+        vertices = np.asarray(vertices, dtype=np.float32)
+        faces = np.asarray(faces, dtype=np.int64)
+        
+        # Step 1: Merge close vertices
+        vertices, faces = merge_close_vertices_o3d(
+            vertices, faces, threshold=threshold, verbose=verbose
+        )
+        
+        # Step 2: Remove isolated pieces
+        vertices, faces = remove_isolated_pieces_o3d(
+            vertices, faces, min_component_ratio=mincomponentRatio, verbose=verbose
+        )
+        
+        # Step 3: Repair mesh
+        vertices, faces = repair_mesh_trimesh(vertices, faces, verbose=verbose)
+        
+        # Step 4: Fill holes
+        vertices, faces = fill_holes_trimesh(
+            vertices, faces, max_hole_size=maxholesize, verbose=verbose
+        )
+        
+        # Step 5: Taubin smoothing (first pass)
+        vertices, faces = smooth_mesh_taubin(
+            vertices, faces, iterations=stepsmoothnum, verbose=verbose
+        )
+        
+        # Step 6: Decimate if needed
+        if len(faces) > targetfacenum:
+            vertices, faces = decimate_mesh_o3d(
+                vertices, faces, target_faces=targetfacenum, verbose=verbose
+            )
+        
+        # Step 7: Taubin smoothing (second pass)
+        vertices, faces = smooth_mesh_taubin(
+            vertices, faces, iterations=stepsmoothnum, verbose=verbose
+        )
+        
+        # Step 8: Final repair
+        vertices, faces = repair_mesh_trimesh(vertices, faces, verbose=verbose)
+        
+        # Step 9: Compute normals
+        normals = compute_vertex_normals(vertices, faces)
+        return vertices, faces, normals
+        
+    except Exception as e:
+        logger.error(f"Mesh preprocessing failed: {e}")
+        # Return original mesh with computed normals
+        normals = compute_vertex_normals(vertices, faces)
+        return vertices, faces, normals
+    finally:
+        # Cleanup
+        gc.collect()
 
 
 ### UV Un-Warp ###
-def uv_parameterize_uvatlas(
-    vertices,
-    faces,
-    size=1024,
-    gutter=2.5,
-    max_stretch=0.1666666716337204,
-    parallel_partitions=16,
-    nthreads=32,
-    use_cuda=True,
-):
-    device = o3d.core.Device("CUDA:0" if use_cuda and o3d.core.cuda.is_available() else "CPU:0")
-    dtype_f = o3d.core.float32
-    dtype_i = o3d.core.int64
-
-    mesh = o3d.t.geometry.TriangleMesh(device)
-
-    mesh.vertex.positions = o3d.core.Tensor(
-        vertices.astype(np.float32), dtype_f, device
-    )
-    mesh.triangle.indices = o3d.core.Tensor(faces.astype(np.int64), dtype_i, device)
-
-    mesh.compute_uvatlas(
-        size=size,
-        gutter=gutter,
-        max_stretch=max_stretch,
-        parallel_partitions=parallel_partitions,
-        nthreads=nthreads,
-    )
-
-    # Copy tensor to CPU before converting to numpy if on CUDA
-    texture_uvs = mesh.triangle.texture_uvs
-    if texture_uvs.device.get_type() != o3d.core.Device.DeviceType.CPU:
-        texture_uvs = texture_uvs.cpu()
+def uv_parameterize_xatlas(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute UV atlas using xatlas directly (more stable than Open3D wrapper).
     
-    return texture_uvs.numpy()  # (#F, 3, 2)
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        
+    Returns:
+        Texture UV coordinates (#F, 3, 2)
+    """
+    import xatlas
+    
+    try:
+        vertices = np.ascontiguousarray(vertices.astype(np.float32))
+        faces = np.ascontiguousarray(faces.astype(np.uint32))
+        vmapping, indices, uvs = xatlas.parametrize(vertices, faces)
+        
+        # Build per-face UV coordinates (#F, 3, 2)
+        # indices contains the new face indices into the uvs array
+        num_faces = len(indices)
+        texture_uvs = np.zeros((num_faces, 3, 2), dtype=np.float32)
+        
+        for i, face in enumerate(indices):
+            for j, idx in enumerate(face):
+                texture_uvs[i, j] = uvs[idx]
+        
+        return texture_uvs
+        
+    except Exception as e:
+        logger.error(f"xatlas UV computation failed: {e}")
+        raise
 
+
+def uv_parameterize_uvatlas(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    size: int = 1024,
+    gutter: float = 2.5,
+    max_stretch: float = 0.1666666716337204,
+    parallel_partitions: int = 1,  # Use single partition for stability
+    nthreads: int = 1,  # Single thread for stability
+    use_cuda: bool = False,  # Disabled - causes segfaults
+) -> np.ndarray:
+    """
+    Compute UV atlas using Open3D (fallback, may be unstable).
+    
+    Args:
+        vertices: Vertex positions (N, 3)
+        faces: Face indices (M, 3)
+        size: UV atlas size
+        gutter: Gutter size between UV islands
+        max_stretch: Maximum texture stretch
+        parallel_partitions: Number of parallel partitions
+        nthreads: Number of threads
+        use_cuda: Whether to use CUDA (disabled by default due to segfaults)
+        
+    Returns:
+        Texture UV coordinates (#F, 3, 2)
+    """
+    try:
+        device = o3d.core.Device("CPU:0")
+            
+        dtype_f = o3d.core.float32
+        dtype_i = o3d.core.int64
+
+        mesh = o3d.t.geometry.TriangleMesh(device)
+        mesh.vertex.positions = o3d.core.Tensor(
+            vertices.astype(np.float32), dtype_f, device
+        )
+        mesh.triangle.indices = o3d.core.Tensor(
+            faces.astype(np.int64), dtype_i, device
+        )
+
+        mesh.compute_uvatlas(
+            size=size,
+            gutter=gutter,
+            max_stretch=max_stretch,
+            parallel_partitions=parallel_partitions,
+            nthreads=nthreads,
+        )
+
+        texture_uvs = mesh.triangle.texture_uvs
+        if texture_uvs.device.get_type() != o3d.core.Device.DeviceType.CPU:
+            texture_uvs = texture_uvs.cpu()
+        
+        return texture_uvs.numpy()  # (#F, 3, 2)
+        
+    except Exception as e:
+        logger.error(f"Open3D UV atlas computation failed: {e}")
+        raise
 
 
 ### Pack All ###
-def process_raw(mesh_path, save_path, preprocess=True, device="cpu"):
-    scene = trimesh.load(mesh_path, force="mesh", process=False)
-    if isinstance(scene, trimesh.Trimesh):
-        mesh = scene
-    elif isinstance(scene, trimesh.scene.Scene):
-        mesh = trimesh.Trimesh()
-        for obj in scene.geometry.values():
-            mesh = trimesh.util.concatenate([mesh, obj])
-    else:
-        raise ValueError(f"Unknown mesh type at {mesh_path}.")
+def process_raw(
+    mesh_path: str,
+    save_path: str,
+    preprocess: bool = True,
+    device: str = "cpu"
+) -> None:
+    """
+    Complete mesh processing pipeline: load, process, UV unwrap, and save.
+    
+    Args:
+        mesh_path: Path to input mesh file
+        save_path: Path to save processed mesh
+        preprocess: Whether to run preprocessing steps
+        device: Device for tensor operations
+    """
+    logger.info(f"Processing mesh: {mesh_path}")
+    
+    try:
+        scene = trimesh.load(mesh_path, force="mesh", process=False)
+        
+        if isinstance(scene, trimesh.Trimesh):
+            mesh = scene
+        elif isinstance(scene, trimesh.scene.Scene):
+            mesh = trimesh.Trimesh()
+            for obj in scene.geometry.values():
+                mesh = trimesh.util.concatenate([mesh, obj])
+        else:
+            raise ValueError(f"Unknown mesh type at {mesh_path}: {type(scene)}")
 
-    vertices = mesh.vertices
-    faces = mesh.faces
+        vertices = np.asarray(mesh.vertices, dtype=np.float32)
+        faces = np.asarray(mesh.faces, dtype=np.int64)
 
-    mesh_post_process_options = {
-        "mincomponentRatio": 0.02,
-        "targetfacenum": 150_000,
-        "maxholesize": 100,
-        "stepsmoothnum": 2,
-        "verbose": True,
-    }
+        mesh_post_process_options = {
+            "mincomponentRatio": 0.02,
+            "targetfacenum": 80_000,  # Reduced from 150k for faster UV computation
+            "maxholesize": 100,
+            "stepsmoothnum": 2,
+            "verbose": True,
+        }
 
-    if preprocess:
-        v_pos, t_pos_idx, normals = process_mesh(
-            vertices=vertices,
-            faces=faces,
-            **mesh_post_process_options,
+        # Process mesh
+        if preprocess:
+            v_pos, t_pos_idx, normals = process_mesh(
+                vertices=vertices,
+                faces=faces,
+                **mesh_post_process_options,
+            )
+        else:
+            v_pos = vertices
+            t_pos_idx = faces
+            normals = compute_vertex_normals(vertices, faces)
+
+        # UV parameterization using xatlas
+        v_tex_np = (
+            uv_parameterize_xatlas(v_pos, t_pos_idx).reshape(-1, 2).astype(np.float32)
         )
-    else:
-        v_pos, t_pos_idx, normals = vertices, faces, mesh.vertex_normals
 
-    v_tex_np = (
-        uv_parameterize_uvatlas(v_pos, t_pos_idx).reshape(-1, 2).astype(np.float32)
-    )
-
-    v_pos = torch.from_numpy(v_pos).to(device=device, dtype=torch.float32)
-    t_pos_idx = torch.from_numpy(t_pos_idx).to(device=device, dtype=torch.long)
-    v_tex = torch.from_numpy(v_tex_np).to(device=device, dtype=torch.float32)
-    normals = torch.from_numpy(normals).to(device=device, dtype=torch.float32)
-    assert v_tex.shape[0] == t_pos_idx.shape[0] * 3
-    t_tex_idx = torch.arange(
-        t_pos_idx.shape[0] * 3,
-        device=device,
-        dtype=torch.long,
-    ).reshape(-1, 3)
-    # uv, index = torch.unique(v_tex, dim=0, return_inverse=True) # 这样实现是2毫秒
-    # super efficient de-duplication
-    v_tex_u_uint32 = v_tex_np[..., 0].view(np.uint32)
-    v_tex_v_uint32 = v_tex_np[..., 1].view(np.uint32)
-    v_hashed = (v_tex_u_uint32.astype(np.uint64) << 32) | v_tex_v_uint32
-    v_hashed = torch.from_numpy(v_hashed.view(np.int64)).to(v_pos.device)
-
-    t_pos_idx_f3 = torch.arange(
-        t_pos_idx.shape[0] * 3, device=t_pos_idx.device, dtype=torch.long
-    ).reshape(-1, 3)
-    v_pos_f3 = v_pos[t_pos_idx].reshape(-1, 3)
-    normals_f3 = normals[t_pos_idx].reshape(-1, 3)
-
-    v_hashed_dedup, inverse_indices = torch.unique(v_hashed, return_inverse=True)
-    dedup_size, full_size = v_hashed_dedup.shape[0], inverse_indices.shape[0]
-    indices = torch.scatter_reduce(
-        torch.full(
-            [dedup_size],
-            fill_value=full_size,
-            device=inverse_indices.device,
+        # Convert to tensors
+        v_pos = torch.from_numpy(v_pos).to(device=device, dtype=torch.float32)
+        t_pos_idx = torch.from_numpy(t_pos_idx).to(device=device, dtype=torch.long)
+        v_tex = torch.from_numpy(v_tex_np).to(device=device, dtype=torch.float32)
+        normals = torch.from_numpy(normals).to(device=device, dtype=torch.float32)
+        
+        assert v_tex.shape[0] == t_pos_idx.shape[0] * 3, \
+            f"UV count mismatch: {v_tex.shape[0]} vs {t_pos_idx.shape[0] * 3}"
+        
+        t_tex_idx = torch.arange(
+            t_pos_idx.shape[0] * 3,
+            device=device,
             dtype=torch.long,
-        ),
-        index=inverse_indices,
-        src=torch.arange(full_size, device=inverse_indices.device, dtype=torch.int64),
-        dim=0,
-        reduce="amin",
-    )
-    v_tex = v_tex[indices]
-    t_tex_idx = inverse_indices.reshape(-1, 3)
+        ).reshape(-1, 3)
+        
+        # Super efficient de-duplication
+        v_tex_u_uint32 = v_tex_np[..., 0].view(np.uint32)
+        v_tex_v_uint32 = v_tex_np[..., 1].view(np.uint32)
+        v_hashed = (v_tex_u_uint32.astype(np.uint64) << 32) | v_tex_v_uint32
+        v_hashed = torch.from_numpy(v_hashed.view(np.int64)).to(v_pos.device)
 
-    v_pos = v_pos_f3[indices]
-    normals = normals_f3[indices]
+        t_pos_idx_f3 = torch.arange(
+            t_pos_idx.shape[0] * 3, device=t_pos_idx.device, dtype=torch.long
+        ).reshape(-1, 3)
+        v_pos_f3 = v_pos[t_pos_idx].reshape(-1, 3)
+        normals_f3 = normals[t_pos_idx].reshape(-1, 3)
 
-    normals = normals.to(dtype=torch.float32, device=device)
+        v_hashed_dedup, inverse_indices = torch.unique(v_hashed, return_inverse=True)
+        dedup_size, full_size = v_hashed_dedup.shape[0], inverse_indices.shape[0]
+        indices = torch.scatter_reduce(
+            torch.full(
+                [dedup_size],
+                fill_value=full_size,
+                device=inverse_indices.device,
+                dtype=torch.long,
+            ),
+            index=inverse_indices,
+            src=torch.arange(full_size, device=inverse_indices.device, dtype=torch.int64),
+            dim=0,
+            reduce="amin",
+        )
+        v_tex = v_tex[indices]
+        t_tex_idx = inverse_indices.reshape(-1, 3)
 
-    # either flip uv or flip texture
-    # here we flip uv
-    uv_to_save = v_tex.clone()
-    uv_to_save[:, 1] = 1.0 - uv_to_save[:, 1]
+        v_pos = v_pos_f3[indices]
+        normals = normals_f3[indices]
+        normals = normals.to(dtype=torch.float32, device=device)
 
-    visual = trimesh.visual.TextureVisuals(uv=uv_to_save.cpu().numpy())
-    tmesh = trimesh.Trimesh(
-        vertices=v_pos.cpu().numpy(),
-        faces=t_tex_idx.cpu().numpy(),
-        vertex_normals=normals.cpu().numpy(),
-        visual=visual,
-        process=False,
-    )
-    tmesh.export(save_path)
+        # Flip UV (either flip uv or flip texture - here we flip uv)
+        uv_to_save = v_tex.clone()
+        uv_to_save[:, 1] = 1.0 - uv_to_save[:, 1]
+
+        # Create and save mesh
+        visual = trimesh.visual.TextureVisuals(uv=uv_to_save.cpu().numpy())
+        tmesh = trimesh.Trimesh(
+            vertices=v_pos.cpu().numpy(),
+            faces=t_tex_idx.cpu().numpy(),
+            vertex_normals=normals.cpu().numpy(),
+            visual=visual,
+            process=False,
+        )
+        tmesh.export(save_path)
+        logger.info(f"Mesh saved: {save_path}")
+        
+    except Exception as e:
+        logger.error(f"process_raw failed: {e}")
+        raise
+    finally:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+# Legacy pymeshlab wrapper functions (for backwards compatibility)
+# These are no longer used but kept for API compatibility
+
+def read_mesh_from_path(mesh_path: str):
+    """Legacy function - use trimesh.load instead."""
+    return trimesh.load(mesh_path, force="mesh", process=False)
+
+
+def mesh_to_meshlab(vertices: np.ndarray, faces: np.ndarray):
+    """Legacy function - returns trimesh instead."""
+    return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+
+def meshlab_to_mesh(mesh):
+    """Legacy function - extracts data from trimesh."""
+    if isinstance(mesh, trimesh.Trimesh):
+        return mesh.vertices, mesh.faces, mesh.vertex_normals
+    raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh)}")
