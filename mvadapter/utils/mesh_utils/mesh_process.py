@@ -593,6 +593,8 @@ def process_raw(
         logger.error(f"process_raw failed: {e}")
         raise
     finally:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

@@ -34,10 +34,11 @@ logger = logging.getLogger("pipeline_texture")
 
 def clear():
     """Clear GPU memory and run garbage collection."""
-    gc.collect()
-    torch.cuda.empty_cache()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 @contextmanager

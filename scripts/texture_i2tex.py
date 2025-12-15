@@ -11,6 +11,7 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 import torch
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
@@ -272,6 +273,27 @@ def inference_i2gtex(
         print(f"No images found in {image_dir_path}, exiting...")
         return
     
+    # Check for pairs.csv to filter by target_id
+    pairs_csv_path = Path(data_dir) / "pairs.csv"
+    if pairs_csv_path.exists():
+        print(f"Found pairs.csv at {pairs_csv_path}")
+        try:
+            pairs_df = pd.read_csv(pairs_csv_path)
+            if 'target_id' in pairs_df.columns:
+                target_ids = set(pairs_df['target_id'].astype(str).unique())
+                print(f"Filtering by {len(target_ids)} unique target_ids from pairs.csv")
+                filtered_sample_ids = [sid for sid in sample_ids if sid in target_ids]
+                print(f"Filtered {len(sample_ids)} samples down to {len(filtered_sample_ids)} based on target_ids")
+                sample_ids = filtered_sample_ids
+            else:
+                print("Warning: pairs.csv found but 'target_id' column not present")
+        except Exception as e:
+            print(f"Warning: Failed to read pairs.csv: {e}")
+    
+    if not sample_ids:
+        print(f"No samples to process after filtering, exiting...")
+        return
+    
     print(f"Found {len(sample_ids)} samples to process")
     random.shuffle(sample_ids)
 
@@ -282,6 +304,14 @@ def inference_i2gtex(
         logger.info(f"\n{'='*60}")
         logger.info(f"Processing sample {idx}/{len(sample_ids)}: {sample_id}")
         logger.info(f"{'='*60}")
+        
+        # Check if output already exists
+        sample_output_dir = Path(output_dir) / shape_provider / sample_id
+        output_mesh_path = sample_output_dir / "textured_mesh.glb"
+        if output_mesh_path.exists():
+            logger.info(f"Output already exists at {output_mesh_path}, skipping...")
+            successful_samples.append(sample_id)
+            continue
         
         image_path = image_dir_path / f"{sample_id}.png"
         mesh_path = _get_mesh_path(Path(data_dir), shape_provider, sample_id)
@@ -301,7 +331,6 @@ def inference_i2gtex(
         if prompt_dir is not None and Path(prompt_dir) / f"{sample_id}.txt":
             logger.info(f"Using prompt: {text_prompt[:50]}..." if len(text_prompt) > 50 else f"Using prompt: {text_prompt}")
         
-        sample_output_dir = Path(output_dir) / shape_provider / sample_id
         os.makedirs(sample_output_dir, exist_ok=True)
 
         try:
@@ -329,10 +358,11 @@ def inference_i2gtex(
 
             # Force cleanup before texture generation
             logger.info("Cleaning up GPU memory...")
-            gc.collect()
-            torch.cuda.empty_cache()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             logger.info("Step 2/3: Generating textured mesh...")
             logger.info(f"  Input mesh: {mesh_path_to_use}")
@@ -367,6 +397,8 @@ def inference_i2gtex(
             failed_samples.append(sample_id)
             
             # Cleanup after error
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
