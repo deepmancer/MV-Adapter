@@ -180,6 +180,8 @@ class TexturePipeline:
         camera_distance: float = 1.0,
         camera_ortho_scale: float = 1.1,
         camera_fov_deg: float = 40,
+        # rendering
+        attr_background: float = 0.5,
         # debug
         debug_mode: bool = False,
     ):
@@ -335,6 +337,7 @@ class TexturePipeline:
                     aoi_cos_valid_threshold=0.2,
                     uv_size=uv_size,
                     return_uv_projection_mask=True,
+                    images_background=attr_background,
                 )
                 uv_proj[~uv_valid_mask] = torch.as_tensor([0.5, 0.5, 1]).to(uv_proj)
             else:
@@ -353,6 +356,7 @@ class TexturePipeline:
                     uv_size=uv_size,
                     uv_padding=not uv_inpaint_use_network,
                     return_dict=True,
+                    images_background=attr_background,
                 )
                 uv_proj, uv_valid_mask, uv_depth_grad = (
                     cam_proj_out.uv_proj,
@@ -407,6 +411,7 @@ class TexturePipeline:
                         uv_size=uv_size,
                         uv_padding=True,
                         return_dict=False,
+                        images_background=attr_background,
                     )
                     # front, sides and back
                     mesh.texture = uv_proj
@@ -424,6 +429,7 @@ class TexturePipeline:
                         uv_size=uv_size,
                         uv_padding=True,
                         return_dict=False,
+                        images_background=attr_background,
                     )
 
                 if mod_name == "orm":

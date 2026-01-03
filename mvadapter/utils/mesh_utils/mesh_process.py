@@ -502,7 +502,7 @@ def process_raw(
 
         mesh_post_process_options = {
             "mincomponentRatio": 0.02,
-            "targetfacenum": 80_000,  # Reduced from 150k for faster UV computation
+            "targetfacenum": 100_000,  # Reduced from 150k for faster UV computation
             "maxholesize": 100,
             "stepsmoothnum": 2,
             "verbose": True,
