@@ -161,14 +161,16 @@ def _load_text_prompt(sample_id: str, prompt_dir: Optional[str], default_text: s
     if prompt_dir is None:
         return default_text
     
-    prompt_path = Path(prompt_dir) / f"{sample_id}.txt"
+    prompt_path = Path(prompt_dir) / f"{sample_id}.json"
     if not prompt_path.exists():
         return default_text
     
     try:
-        with open(prompt_path, 'r', encoding='utf-8') as f:
-            prompt_content = f.read().strip()
-        return prompt_content if prompt_content else default_text
+        import json
+        prompts_dict = json.load(open(prompt_path, 'r'))
+        prompt = prompts_dict.get("subject", [{}])[0].get("description", "")
+        prompt = f"{default_text}, professionally lit, studio lighting. {prompt}".strip()
+        return prompt
     except Exception as e:
         print(f"Warning: Could not read prompt file {prompt_path}: {e}")
         return default_text
@@ -347,7 +349,7 @@ def inference_i2gtex(
                 guidance_scale=3.0,
                 seed=seed,
                 reference_conditioning_scale=reference_conditioning_scale,
-                negative_prompt="watermark, ugly, deformed, noisy, blurry, low contrast",
+                negative_prompt="watermark, ugly, deformed, noisy, blurry, low contrast, face asymmetry, eyes asymmetry, deformed eyes, open mouth, bad anatomy, extra limbs, missing limbs, floating limbs, mutated hands and fingers, poorly drawn hands and fingers, fused fingers, too many fingers, long neck, long body, cropped, worst quality, low quality, jpeg artifacts, ugly, duplicate, bad lighting",
                 device=device,
                 remove_bg_fn=remove_bg_fn,
             )
@@ -426,12 +428,12 @@ if __name__ == "__main__":
     parser.add_argument("--variant", type=str, default="sdxl", choices=["sdxl", "sd21"], 
                         help="Model variant to use")
     # I/O
-    parser.add_argument("--data_dir", type=str, default="/workspace/outputs_new/")
-    parser.add_argument("--prompt_dir", type=str, default="/workspace/outputs_new/prompt/general")
-    parser.add_argument("--default_text", type=str, default="high quality photo, photograph of a person")
+    parser.add_argument("--data_dir", type=str, default="/workspace/celeba_reduced/")
+    parser.add_argument("--prompt_dir", type=str, default="/workspace/celeba_reduced/prompt/")
+    parser.add_argument("--default_text", type=str, default="high quality photo, photograph of a person, ultra-detailed, strand-level hair, 8k, realistic hair texture")
     parser.add_argument("--seed", type=int, default=-1)
-    parser.add_argument("--output_dir", type=str, default="/workspace/outputs_new/mvadapter/")
-    parser.add_argument("--shape_provider", type=str, default="hunyuan", choices=["hunyuan", "hi3dgen"])
+    parser.add_argument("--output_dir", type=str, default="/workspace/celeba_reduced/mvadapter/")
+    parser.add_argument("--shape_provider", type=str, default="hi3dgen", choices=["hunyuan", "hi3dgen"])
     parser.add_argument(
         "--sdxl_model_id", type=str, default="SG161222/RealVisXL_V4.0",
         choices=["stabilityai/stable-diffusion-xl-base-1.0", "SG161222/RealVisXL_V4.0"],
